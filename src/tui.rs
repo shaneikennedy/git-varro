@@ -39,20 +39,13 @@ impl App {
     }
 
     fn toggle_sort(&mut self) {
-        let prev = self
-            .hits_slice()
-            .get(self.list_state.selected().unwrap_or(0))
-            .map(|h| h.full_sha.clone());
         self.commit_sort = match self.commit_sort {
             CommitSort::Date => CommitSort::Score,
             CommitSort::Score => CommitSort::Date,
         };
-        let list = self.hits_slice();
-        let idx = prev
-            .and_then(|s| list.iter().position(|h| h.full_sha == s))
-            .unwrap_or(0);
-        let idx = idx.min(list.len().saturating_sub(1));
-        self.list_state.select(Some(idx));
+        if !self.hits_slice().is_empty() {
+            self.list_state.select(Some(0));
+        }
     }
 }
 
