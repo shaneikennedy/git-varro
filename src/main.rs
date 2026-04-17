@@ -266,7 +266,7 @@ fn index_commits(repo: &Path, varro_dir: &Path, commits: &[String]) -> Result<()
     let pb = ProgressBar::new(total);
     pb.set_style(
         ProgressStyle::with_template(
-            "{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} commits — {msg} (eta {eta})",
+            "{spinner:.green} [{wide_bar:.cyan/blue}] {pos}/{len} commits — {msg} (eta {eta})",
         )
         .context("progress bar template")?
         .progress_chars("#>-"),
