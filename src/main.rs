@@ -39,13 +39,16 @@ enum Commands {
     Search {
         /// Words or phrase to find in commit messages (not raw VQL)
         query: String,
+        /// Print matches to stdout (score order) instead of opening the TUI
+        #[arg(long = "no-tui", short = 'n')]
+        no_tui: bool,
     },
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
-        Commands::Search { query } => run_search(&query),
+        Commands::Search { query, no_tui } => run_search(&query, no_tui),
     }
 }
 
@@ -57,7 +60,11 @@ pub(crate) fn short_sha(full: &str) -> &str {
     }
 }
 
-fn run_search(query: &str) -> Result<()> {
+pub(crate) fn first_line(message: &str) -> &str {
+    message.lines().next().unwrap_or("").trim_end()
+}
+
+fn run_search(query: &str, no_tui: bool) -> Result<()> {
     let query = query.trim();
     if query.is_empty() {
         bail!("search query is empty");
@@ -111,6 +118,25 @@ fn run_search(query: &str) -> Result<()> {
             score,
         })
         .collect();
+
+    if no_tui {
+        let mut rows = hits;
+        rows.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.full_sha.cmp(&b.full_sha))
+        });
+        for h in rows {
+            println!(
+                "{}  {}  {:.4}",
+                short_sha(&h.full_sha),
+                first_line(&h.message),
+                h.score
+            );
+        }
+        return Ok(());
+    }
 
     let date_ordered = order_hits_by_main_history(&repo, &hits)?;
     let mut score_ordered = hits;

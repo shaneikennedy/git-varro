@@ -11,6 +11,7 @@ use ratatui::DefaultTerminal;
 
 use crate::CommitSort;
 use crate::SearchHit;
+use crate::first_line;
 use crate::short_sha;
 
 struct App {
@@ -152,10 +153,6 @@ fn select_next(state: &mut ListState, len: usize) {
     let i = state.selected().unwrap_or(0);
     let n = if i + 1 >= len { 0 } else { i + 1 };
     state.select(Some(n));
-}
-
-fn first_line(message: &str) -> &str {
-    message.lines().next().unwrap_or("").trim_end()
 }
 
 fn hits_for_sort<'a>(
