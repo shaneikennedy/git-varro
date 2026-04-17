@@ -167,10 +167,6 @@ fn git_rev_list_newest_first(repo: &Path, revision: &str) -> Result<Vec<String>>
         .collect())
 }
 
-pub(crate) fn git_show_full(repo: &Path, sha: &str) -> Result<String> {
-    git_output(repo, &["show", sha])
-}
-
 /// Varro VQL uses single-quoted literals for arbitrary text (double quotes are not valid there).
 /// BM25 on `message` OR vector similarity on `message`, same phrase for both sides.
 fn hybrid_message_vql(user_query: &str) -> String {
