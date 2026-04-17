@@ -19,6 +19,13 @@ const VARRO_MIN_SEGMENT_SIZE: usize = 512 * 1024 * 1024;
 /// Varro flusher auto-flush threshold (`Varro::with_max_buffer_size`); default in the library is 50 MiB.
 const VARRO_MAX_BUFFER_SIZE: usize = 512 * 1024 * 1024;
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum CommitSort {
+    #[default]
+    Date,
+    Score,
+}
+
 #[derive(Parser)]
 #[command(name = "git-varro", about = "Search commit messages on the main branch with Varro")]
 struct Cli {
@@ -39,6 +46,14 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Commands::Search { query } => run_search(&query),
+    }
+}
+
+pub(crate) fn short_sha(full: &str) -> &str {
+    if full.len() <= 7 {
+        full
+    } else {
+        &full[..7]
     }
 }
 
@@ -97,8 +112,15 @@ fn run_search(query: &str) -> Result<()> {
         })
         .collect();
 
-    let ordered = order_hits_by_main_history(&repo, &hits)?;
-    tui::run(repo, ordered)?;
+    let date_ordered = order_hits_by_main_history(&repo, &hits)?;
+    let mut score_ordered = hits;
+    score_ordered.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.full_sha.cmp(&b.full_sha))
+    });
+    tui::run(repo, date_ordered, score_ordered)?;
 
     Ok(())
 }
