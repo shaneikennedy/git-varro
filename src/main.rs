@@ -4,6 +4,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
@@ -16,8 +17,9 @@ const INDEX_FIELD: &str = "message";
 const LAST_FILE: &str = ".last";
 /// Varro compactor threshold (`Varro::with_min_segment_size`); default in the library is 64 MiB.
 const VARRO_MIN_SEGMENT_SIZE: usize = 512 * 1024 * 1024;
-/// Varro flusher auto-flush threshold (`Varro::with_max_buffer_size`); default in the library is 50 MiB.
-const VARRO_MAX_BUFFER_SIZE: usize = 512 * 1024 * 1024;
+const VARRO_MAX_BUFFER_SIZE: usize = 50 * 1024;
+/// Varro background compaction wake interval (`Varro::with_compaction_frequency`).
+const VARRO_COMPACTION_FREQUENCY: Duration = Duration::from_secs(60);
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum CommitSort {
@@ -83,7 +85,8 @@ fn run_search(query: &str, no_tui: bool) -> Result<()> {
     let engine = Varro::new(&varro_dir, FileSystemType::Local)
         .with_context(|| format!("open Varro index at {}", varro_dir.display()))?
         .with_min_segment_size(VARRO_MIN_SEGMENT_SIZE)
-        .with_max_buffer_size(VARRO_MAX_BUFFER_SIZE);
+        .with_max_buffer_size(VARRO_MAX_BUFFER_SIZE)
+        .with_compaction_frequency(VARRO_COMPACTION_FREQUENCY);
 
     let vql = hybrid_message_vql(query);
     let opts = SearchOptions::new().with_include_documents(true);
@@ -260,7 +263,8 @@ fn index_commits(repo: &Path, varro_dir: &Path, commits: &[String]) -> Result<()
     let engine = Varro::new(varro_dir, FileSystemType::Local)
         .with_context(|| format!("open Varro index at {}", varro_dir.display()))?
         .with_min_segment_size(VARRO_MIN_SEGMENT_SIZE)
-        .with_max_buffer_size(VARRO_MAX_BUFFER_SIZE);
+        .with_max_buffer_size(VARRO_MAX_BUFFER_SIZE)
+        .with_compaction_frequency(VARRO_COMPACTION_FREQUENCY);
 
     let total = commits.len() as u64;
     let pb = ProgressBar::new(total);
