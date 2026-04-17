@@ -3,11 +3,11 @@ mod tui;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
+use git2::{Repository, RevparseMode, Sort};
 use indicatif::{ProgressBar, ProgressStyle};
 use rayon::prelude::*;
 use varro::{Document, FileSystemType, SearchOptions, Varro};
@@ -17,7 +17,7 @@ const INDEX_FIELD: &str = "message";
 const LAST_FILE: &str = ".last";
 /// Varro compactor threshold (`Varro::with_min_segment_size`); default in the library is 64 MiB.
 const VARRO_MIN_SEGMENT_SIZE: usize = 512 * 1024 * 1024;
-const VARRO_MAX_BUFFER_SIZE: usize = 50 * 1024;
+const VARRO_MAX_BUFFER_SIZE: usize = 1024 * 1024;
 /// Varro background compaction wake interval (`Varro::with_compaction_frequency`).
 const VARRO_COMPACTION_FREQUENCY: Duration = Duration::from_secs(60);
 
@@ -73,14 +73,15 @@ fn run_search(query: &str, no_tui: bool) -> Result<()> {
     }
 
     let repo = find_git_root(&std::env::current_dir()?).context("not inside a git repository")?;
+    let git = Repository::open(&repo).context("open repository with git2")?;
     let varro_dir = repo.join(".varro");
     fs::create_dir_all(&varro_dir).with_context(|| format!("create {}", varro_dir.display()))?;
 
-    verify_main_exists(&repo)?;
+    verify_main_branch(&git)?;
 
-    let main_tip = git_trimmed(&repo, &["rev-parse", MAIN_BRANCH])?;
+    let main_tip = resolve_revision_to_oid_hex(&git, MAIN_BRANCH)?;
 
-    sync_index(&repo, &varro_dir, &main_tip)?;
+    sync_index(&git, &varro_dir, &main_tip)?;
 
     let engine = Varro::new(&varro_dir, FileSystemType::Local)
         .with_context(|| format!("open Varro index at {}", varro_dir.display()))?
@@ -141,7 +142,7 @@ fn run_search(query: &str, no_tui: bool) -> Result<()> {
         return Ok(());
     }
 
-    let date_ordered = order_hits_by_main_history(&repo, &hits)?;
+    let date_ordered = order_hits_by_main_history(&git, &hits)?;
     let mut score_ordered = hits;
     score_ordered.sort_by(|a, b| {
         b.score
@@ -161,7 +162,7 @@ pub(crate) struct SearchHit {
     pub score: f64,
 }
 
-fn order_hits_by_main_history(repo: &Path, hits: &[SearchHit]) -> Result<Vec<SearchHit>> {
+fn order_hits_by_main_history(git: &Repository, hits: &[SearchHit]) -> Result<Vec<SearchHit>> {
     let set: HashSet<String> = hits.iter().map(|h| h.full_sha.clone()).collect();
     let map: HashMap<String, SearchHit> = hits
         .iter()
@@ -169,9 +170,9 @@ fn order_hits_by_main_history(repo: &Path, hits: &[SearchHit]) -> Result<Vec<Sea
         .collect();
 
     let mut out = Vec::new();
-    for line in git_rev_list_newest_first(repo, MAIN_BRANCH)? {
-        if set.contains(&line) {
-            if let Some(hit) = map.get(&line) {
+    for oid_hex in git2_rev_list_newest_first(git, MAIN_BRANCH)? {
+        if set.contains(&oid_hex) {
+            if let Some(hit) = map.get(&oid_hex) {
                 out.push(hit.clone());
             }
         }
@@ -186,16 +187,6 @@ fn order_hits_by_main_history(repo: &Path, hits: &[SearchHit]) -> Result<Vec<Sea
     Ok(out)
 }
 
-fn git_rev_list_newest_first(repo: &Path, revision: &str) -> Result<Vec<String>> {
-    let out = git_output(repo, &["rev-list", revision])?;
-    Ok(out
-        .lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty())
-        .map(String::from)
-        .collect())
-}
-
 /// Varro VQL uses single-quoted literals for arbitrary text (double quotes are not valid there).
 /// BM25 on `message` OR vector similarity on `message`, same phrase for both sides.
 fn hybrid_message_vql(user_query: &str) -> String {
@@ -203,7 +194,7 @@ fn hybrid_message_vql(user_query: &str) -> String {
     format!("message:'{safe}' | ~message:'{safe}'")
 }
 
-fn sync_index(repo: &Path, varro_dir: &Path, main_tip: &str) -> Result<()> {
+fn sync_index(git: &Repository, varro_dir: &Path, main_tip: &str) -> Result<()> {
     let last_path = varro_dir.join(LAST_FILE);
     let last_sha = match fs::read_to_string(&last_path) {
         Ok(s) => {
@@ -220,7 +211,7 @@ fn sync_index(repo: &Path, varro_dir: &Path, main_tip: &str) -> Result<()> {
     let need_full = match &last_sha {
         None => true,
         Some(last) if last == main_tip => false,
-        Some(last) => !is_ancestor(repo, last, MAIN_BRANCH)?,
+        Some(last) => !is_ancestor(git, last, MAIN_BRANCH)?,
     };
 
     if need_full {
@@ -230,8 +221,7 @@ fn sync_index(repo: &Path, varro_dir: &Path, main_tip: &str) -> Result<()> {
         fs::remove_dir_all(varro_dir).ok();
         fs::create_dir_all(varro_dir)
             .with_context(|| format!("create {}", varro_dir.display()))?;
-        let commits = git_rev_list(repo, MAIN_BRANCH)?;
-        index_commits(repo, varro_dir, &commits)?;
+        index_commits(git, varro_dir, MAIN_BRANCH)?;
         write_last(varro_dir, main_tip)?;
         return Ok(());
     }
@@ -242,21 +232,16 @@ fn sync_index(repo: &Path, varro_dir: &Path, main_tip: &str) -> Result<()> {
 
     let last = last_sha.as_deref().expect("checked");
     let range = format!("{last}..{MAIN_BRANCH}");
-    let commits = git_rev_list(repo, &range)?;
-    if !commits.is_empty() {
-        index_commits(repo, varro_dir, &commits)?;
-    }
+    index_commits(git, varro_dir, &range)?;
     write_last(varro_dir, main_tip)?;
     Ok(())
 }
 
-fn index_commits(repo: &Path, varro_dir: &Path, commits: &[String]) -> Result<()> {
-    let commits: Vec<String> = commits
-        .iter()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .collect();
-    if commits.is_empty() {
+/// `revision` is anything `git rev-parse` accepts for a walk (e.g. `main`, `abc..main`).
+/// Commit messages are read via **git2** (libgit2); Varro indexing still runs in parallel.
+fn index_commits(git: &Repository, varro_dir: &Path, revision: &str) -> Result<()> {
+    let rows = git2_commit_messages_rows(git, revision)?;
+    if rows.is_empty() {
         return Ok(());
     }
 
@@ -266,22 +251,20 @@ fn index_commits(repo: &Path, varro_dir: &Path, commits: &[String]) -> Result<()
         .with_max_buffer_size(VARRO_MAX_BUFFER_SIZE)
         .with_compaction_frequency(VARRO_COMPACTION_FREQUENCY);
 
-    let total = commits.len() as u64;
+    let total = rows.len() as u64;
     let pb = ProgressBar::new(total);
     pb.set_style(
         ProgressStyle::with_template(
-            "{spinner:.green} [{wide_bar:.cyan/blue}] {pos}/{len} commits — {msg} (eta {eta})",
+            "{spinner:.green} [{wide_bar:.cyan/blue}] {pos}/{len} commits — {msg}",
         )
         .context("progress bar template")?
         .progress_chars("#>-"),
     );
     pb.set_message("queued into Varro");
 
-    let index_one = |sha: &String| -> Result<()> {
-        let full_sha = git_trimmed(repo, &["rev-parse", sha.as_str()])?;
-        let message = git_commit_message(repo, &full_sha)?;
+    let index_one = |(full_sha, message): &(String, String)| -> Result<()> {
         let mut doc = Document::new(full_sha.clone());
-        doc.add_field(INDEX_FIELD.into(), message, true);
+        doc.add_field(INDEX_FIELD.into(), message.clone(), true);
         engine
             .index(doc)
             .with_context(|| format!("index commit {full_sha}"))?;
@@ -289,7 +272,7 @@ fn index_commits(repo: &Path, varro_dir: &Path, commits: &[String]) -> Result<()
         Ok(())
     };
 
-    let result: Result<()> = commits.par_iter().try_for_each(index_one);
+    let result: Result<()> = rows.par_iter().try_for_each(index_one);
     if result.is_err() {
         pb.abandon();
     }
@@ -306,74 +289,119 @@ fn write_last(varro_dir: &Path, sha: &str) -> Result<()> {
     Ok(())
 }
 
-fn git_commit_message(repo: &Path, sha: &str) -> Result<String> {
-    git_output(repo, &["show", "-s", "--format=%B", sha])
-}
-
-fn git_rev_list(repo: &Path, range: &str) -> Result<Vec<String>> {
-    let out = git_output(repo, &["rev-list", "--reverse", range])?;
-    Ok(out
-        .lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty())
-        .map(String::from)
-        .collect())
-}
-
-fn is_ancestor(repo: &Path, ancestor: &str, descendant: &str) -> Result<bool> {
-    let status = Command::new("git")
-        .arg("-C")
-        .arg(repo)
-        .args(["merge-base", "--is-ancestor", ancestor, descendant])
-        .status()
-        .context("run git merge-base --is-ancestor")?;
-    Ok(status.success())
-}
-
-fn verify_main_exists(repo: &Path) -> Result<()> {
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(repo)
-        .args(["rev-parse", "--verify", MAIN_BRANCH])
-        .output()
-        .context("run git rev-parse --verify main")?;
-
-    if out.status.success() {
-        return Ok(());
-    }
-
-    bail!(
-        "branch `{MAIN_BRANCH}` not found in this repository (git-varro only indexes `{MAIN_BRANCH}`).\n{}",
-        String::from_utf8_lossy(&out.stderr).trim()
-    );
-}
-
-fn git_trimmed(repo: &Path, args: &[&str]) -> Result<String> {
-    let s = git_output(repo, args)?;
-    let s = s.trim();
-    if s.is_empty() {
-        bail!("git {:?} produced empty output", args);
-    }
-    Ok(s.to_string())
-}
-
-fn git_output(repo: &Path, args: &[&str]) -> Result<String> {
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(repo)
-        .args(args)
-        .output()
-        .with_context(|| format!("spawn git {:?}", args))?;
-
-    if !out.status.success() {
+fn verify_main_branch(git: &Repository) -> Result<()> {
+    if let Err(e) = git.resolve_reference_from_short_name(MAIN_BRANCH) {
         bail!(
-            "git {:?} failed: {}",
-            args,
-            String::from_utf8_lossy(&out.stderr).trim()
+            "branch `{MAIN_BRANCH}` not found in this repository (git-varro only indexes `{MAIN_BRANCH}`).\n{e}"
         );
     }
+    Ok(())
+}
 
-    Ok(String::from_utf8_lossy(&out.stdout).to_string())
+fn resolve_revision_to_oid_hex(git: &Repository, spec: &str) -> Result<String> {
+    Ok(git
+        .revparse_single(spec)
+        .with_context(|| format!("resolve revision {spec:?}"))?
+        .peel_to_commit()
+        .with_context(|| format!("revision {spec:?} is not a commit"))?
+        .id()
+        .to_string())
+}
+
+fn is_ancestor(git: &Repository, ancestor: &str, descendant: &str) -> Result<bool> {
+    let a = git
+        .revparse_single(ancestor)
+        .with_context(|| format!("revparse ancestor {ancestor:?}"))?
+        .id();
+    let d = git
+        .revparse_single(descendant)
+        .with_context(|| format!("revparse descendant {descendant:?}"))?
+        .id();
+    git.graph_descendant_of(d, a)
+        .context("git2 graph_descendant_of (merge-base --is-ancestor)")
+}
+
+/// Configure `revwalk` like `git rev-list` for `revision` (`main` or two-dot `A..B`).
+fn git2_push_revspec_for_revwalk(git: &Repository, rw: &mut git2::Revwalk, revision: &str) -> Result<()> {
+    if revision.contains("..") {
+        let spec = git
+            .revparse(revision)
+            .with_context(|| format!("git2 revparse {revision:?}"))?;
+        if spec.mode().contains(RevparseMode::MERGE_BASE) {
+            bail!(
+                "git-varro does not support three-dot revspecs ({revision}); use two-dot ranges only"
+            );
+        }
+        let from = spec
+            .from()
+            .with_context(|| format!("revparse {revision:?}: missing left side of range"))?;
+        let to = spec
+            .to()
+            .with_context(|| format!("revparse {revision:?}: missing right side of range"))?;
+        rw.hide(from.id())?;
+        rw.push(to.id())?;
+    } else {
+        rw.push(
+            git.revparse_single(revision)
+                .with_context(|| format!("git2 revparse_single {revision:?}"))?
+                .peel_to_commit()
+                .with_context(|| format!("revision {revision:?} is not a commit"))?
+                .id(),
+        )?;
+    }
+    Ok(())
+}
+
+/// Oldest commit first (same order as `git log --reverse` / previous `rev-list --reverse`).
+fn git2_commits_oldest_first(git: &Repository, revision: &str) -> Result<Vec<git2::Oid>> {
+    let mut rw = git.revwalk()?;
+    rw.set_sorting(Sort::TOPOLOGICAL | Sort::TIME)
+        .context("revwalk set_sorting")?;
+    git2_push_revspec_for_revwalk(git, &mut rw, revision)?;
+    let mut ids = Vec::new();
+    for id in rw {
+        ids.push(id?);
+    }
+    ids.reverse();
+    Ok(ids)
+}
+
+fn git2_commit_messages_rows(git: &Repository, revision: &str) -> Result<Vec<(String, String)>> {
+    let ids = git2_commits_oldest_first(git, revision)?;
+    let mut rows = Vec::with_capacity(ids.len());
+    for id in ids {
+        let commit = git
+            .find_commit(id)
+            .with_context(|| format!("find_commit {}", id))?;
+        let message = commit_message_raw_utf8(&commit)?;
+        rows.push((id.to_string(), message));
+    }
+    Ok(rows)
+}
+
+/// Matches `git log` `%B` / raw commit message bytes as UTF-8 (strict).
+fn commit_message_raw_utf8(commit: &git2::Commit) -> Result<String> {
+    String::from_utf8(commit.message_raw_bytes().to_vec())
+        .context("commit message is not valid UTF-8")
+}
+
+/// Same order as `git rev-list` (newest first) for one positive ref.
+fn git2_rev_list_newest_first(git: &Repository, revision: &str) -> Result<Vec<String>> {
+    let mut rw = git.revwalk()?;
+    rw.set_sorting(Sort::TOPOLOGICAL | Sort::TIME)
+        .context("revwalk set_sorting")?;
+    rw.push(
+        git.revparse_single(revision)
+            .with_context(|| format!("git2 revparse_single {revision:?}"))?
+            .peel_to_commit()
+            .with_context(|| format!("revision {revision:?} is not a commit"))?
+            .id(),
+    )?;
+    let mut out = Vec::new();
+    for id in rw {
+        out.push(id?.to_string());
+    }
+    Ok(out)
 }
 
 fn find_git_root(start: &Path) -> Option<PathBuf> {
