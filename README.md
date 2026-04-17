@@ -16,7 +16,7 @@ From a clone of this repository:
 cargo build --release
 ```
 
-Put the binary on your `PATH` (so Git can find it as `git-varro`):
+Put the binary on your `PATH`:
 
 ```sh
 cp target/release/git-varro ~/.local/bin/   # or another directory on PATH
@@ -31,7 +31,7 @@ cargo install --path .
 Confirm:
 
 ```sh
-git varro --help
+git-varro --help
 ```
 
 ## Usage
@@ -39,18 +39,18 @@ git varro --help
 From inside a Git repository:
 
 ```sh
-git varro search "your phrase"
+git-varro search "your phrase"
 ```
 
 This updates the index if needed, runs a hybrid BM25 + semantic search (Varro), then opens a **terminal UI**: commit list (short SHA + subject), full message on the right, **`t`** toggles sort between **date** (on `main`) and **match score**, **Enter** opens **`git show`** in your normal **pager** (colors, `q` to return to the UI), **`Q`** quits the app.
 
 ## Give your agents search super powers
 
-Coding agents, scripts, and CI jobs do not need a TUI. Pass **`--no-tui`** or **`-n`** so `git varro search` writes plain lines to **stdout** instead: each line is **short SHA**, **first line of the commit message**, and **score**, in **descending score order** (best match first). No colors or escape codes—easy to grep, pipe, or feed into a prompt.
+Coding agents, scripts, and CI jobs do not need a TUI. Pass **`--no-tui`** or **`-n`** so `git-varro search` writes plain lines to **stdout** instead: each line is **short SHA**, **first line of the commit message**, and **score**, in **descending score order** (best match first). No colors or escape codes—easy to grep, pipe, or feed into a prompt.
 
 ```sh
-git varro search "regression in checkout" --no-tui
-git varro search "oauth" -n
+git-varro search "regression in checkout" --no-tui
+git-varro search "oauth" -n
 ```
 
 Same indexing and search as the interactive flow; only the presentation changes.
