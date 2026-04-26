@@ -11,7 +11,8 @@ use git2::{Repository, RevparseMode, Sort};
 use indicatif::{ProgressBar, ProgressStyle};
 use rayon::prelude::*;
 use varro::{
-    CompactionOptions, Document, FileSystemType, FlushOptions, Options, SearchOptions, Varro,
+    CompactionOptions, Document, FileSystemType, FlushOptions, Options, SearchOptions,
+    SemanticSearchOptions, Varro,
 };
 
 const MAIN_BRANCH: &str = "main";
@@ -96,6 +97,7 @@ fn run_search(query: &str, no_tui: bool) -> Result<()> {
         flush: FlushOptions {
             max_buffer_size: VARRO_MAX_BUFFER_SIZE,
         },
+        semantic_search: SemanticSearchOptions::new(false),
     };
 
     let engine = Varro::new(&varro_dir, opts)
@@ -267,6 +269,7 @@ fn index_commits(git: &Repository, varro_dir: &Path, revision: &str) -> Result<(
         flush: FlushOptions {
             max_buffer_size: VARRO_MAX_BUFFER_SIZE,
         },
+        semantic_search: SemanticSearchOptions::new(false),
     };
 
     let engine = Varro::new(varro_dir, opts)
