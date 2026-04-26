@@ -5,12 +5,14 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use git2::{Repository, RevparseMode, Sort};
 use indicatif::{ProgressBar, ProgressStyle};
 use rayon::prelude::*;
-use varro::{Document, FileSystemType, SearchOptions, Varro};
+use varro::{
+    CompactionOptions, Document, FileSystemType, FlushOptions, Options, SearchOptions, Varro,
+};
 
 const MAIN_BRANCH: &str = "main";
 const INDEX_FIELD: &str = "message";
@@ -29,7 +31,10 @@ pub(crate) enum CommitSort {
 }
 
 #[derive(Parser)]
-#[command(name = "git-varro", about = "Search commit messages on the main branch with Varro")]
+#[command(
+    name = "git-varro",
+    about = "Search commit messages on the main branch with Varro"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -82,12 +87,19 @@ fn run_search(query: &str, no_tui: bool) -> Result<()> {
     let main_tip = resolve_revision_to_oid_hex(&git, MAIN_BRANCH)?;
 
     sync_index(&git, &varro_dir, &main_tip)?;
+    let opts = Options {
+        filesystem: FileSystemType::Local,
+        compaction: CompactionOptions {
+            min_segment_size: VARRO_MIN_SEGMENT_SIZE,
+            compaction_frequency: VARRO_COMPACTION_FREQUENCY,
+        },
+        flush: FlushOptions {
+            max_buffer_size: VARRO_MAX_BUFFER_SIZE,
+        },
+    };
 
-    let engine = Varro::new(&varro_dir, FileSystemType::Local)
-        .with_context(|| format!("open Varro index at {}", varro_dir.display()))?
-        .with_min_segment_size(VARRO_MIN_SEGMENT_SIZE)
-        .with_max_buffer_size(VARRO_MAX_BUFFER_SIZE)
-        .with_compaction_frequency(VARRO_COMPACTION_FREQUENCY);
+    let engine = Varro::new(&varro_dir, opts)
+        .with_context(|| format!("open Varro index at {}", varro_dir.display()))?;
 
     let vql = hybrid_message_vql(query);
     let opts = SearchOptions::new().with_include_documents(true);
@@ -216,11 +228,12 @@ fn sync_index(git: &Repository, varro_dir: &Path, main_tip: &str) -> Result<()> 
 
     if need_full {
         if last_sha.is_some() {
-            eprintln!("git-varro: indexed tip is not an ancestor of {MAIN_BRANCH}; rebuilding index.");
+            eprintln!(
+                "git-varro: indexed tip is not an ancestor of {MAIN_BRANCH}; rebuilding index."
+            );
         }
         fs::remove_dir_all(varro_dir).ok();
-        fs::create_dir_all(varro_dir)
-            .with_context(|| format!("create {}", varro_dir.display()))?;
+        fs::create_dir_all(varro_dir).with_context(|| format!("create {}", varro_dir.display()))?;
         index_commits(git, varro_dir, MAIN_BRANCH)?;
         write_last(varro_dir, main_tip)?;
         return Ok(());
@@ -245,11 +258,19 @@ fn index_commits(git: &Repository, varro_dir: &Path, revision: &str) -> Result<(
         return Ok(());
     }
 
-    let engine = Varro::new(varro_dir, FileSystemType::Local)
-        .with_context(|| format!("open Varro index at {}", varro_dir.display()))?
-        .with_min_segment_size(VARRO_MIN_SEGMENT_SIZE)
-        .with_max_buffer_size(VARRO_MAX_BUFFER_SIZE)
-        .with_compaction_frequency(VARRO_COMPACTION_FREQUENCY);
+    let opts = Options {
+        filesystem: FileSystemType::Local,
+        compaction: CompactionOptions {
+            min_segment_size: VARRO_MIN_SEGMENT_SIZE,
+            compaction_frequency: VARRO_COMPACTION_FREQUENCY,
+        },
+        flush: FlushOptions {
+            max_buffer_size: VARRO_MAX_BUFFER_SIZE,
+        },
+    };
+
+    let engine = Varro::new(varro_dir, opts)
+        .with_context(|| format!("open Varro index at {}", varro_dir.display()))?;
 
     let total = rows.len() as u64;
     let pb = ProgressBar::new(total);
@@ -322,7 +343,11 @@ fn is_ancestor(git: &Repository, ancestor: &str, descendant: &str) -> Result<boo
 }
 
 /// Configure `revwalk` like `git rev-list` for `revision` (`main` or two-dot `A..B`).
-fn git2_push_revspec_for_revwalk(git: &Repository, rw: &mut git2::Revwalk, revision: &str) -> Result<()> {
+fn git2_push_revspec_for_revwalk(
+    git: &Repository,
+    rw: &mut git2::Revwalk,
+    revision: &str,
+) -> Result<()> {
     if revision.contains("..") {
         let spec = git
             .revparse(revision)

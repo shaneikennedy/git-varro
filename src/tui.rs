@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Style, Stylize};
@@ -9,10 +9,10 @@ use ratatui::text::{Line, Text};
 use ratatui::widgets::{Block, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::DefaultTerminal;
 
-use crate::CommitSort;
-use crate::SearchHit;
 use crate::first_line;
 use crate::short_sha;
+use crate::CommitSort;
+use crate::SearchHit;
 
 struct App {
     repo: PathBuf,
@@ -31,11 +31,7 @@ impl App {
     }
 
     fn hits_slice(&self) -> &[SearchHit] {
-        hits_for_sort(
-            self.commit_sort,
-            &self.date_ordered,
-            &self.score_ordered,
-        )
+        hits_for_sort(self.commit_sort, &self.date_ordered, &self.score_ordered)
     }
 
     fn toggle_sort(&mut self) {
@@ -185,10 +181,7 @@ fn draw_browse(f: &mut ratatui::Frame<'_>, area: Rect, app: &mut App) {
             ]))
         })
         .collect();
-    let msg: String = hits
-        .get(sel)
-        .map(|h| h.message.clone())
-        .unwrap_or_default();
+    let msg: String = hits.get(sel).map(|h| h.message.clone()).unwrap_or_default();
 
     let list_title = match sort {
         CommitSort::Date => " commits (main, by date) ",

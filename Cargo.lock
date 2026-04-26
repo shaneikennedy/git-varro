@@ -3218,7 +3218,6 @@ dependencies = [
 [[package]]
 name = "varro"
 version = "0.1.0"
-source = "git+https://github.com/shaneikennedy/varro?branch=master#f40d6902050d8ebb9e49868e7faf2005568cae96"
 dependencies = [
  "anyhow",
  "bincode",
